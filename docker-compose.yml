@@ -1,0 +1,20 @@
+services:
+  diarizer:
+    build: .
+    container_name: auto-diarizer
+    restart: unless-stopped
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ./data_volume:/app/data
+      - ./hf_cache:/root/.cache/huggingface
+    environment:
+      - WHISPER_MODEL=medium
+      - NVIDIA_ visible_devices=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
