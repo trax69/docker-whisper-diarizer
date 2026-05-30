@@ -1,9 +1,13 @@
 services:
+
+  # Daemon: watches /app/data/input and processes files automatically
   diarizer:
     build: .
     container_name: auto-diarizer
     restart: unless-stopped
     runtime: nvidia
+    mem_limit: 10g
+    memswap_limit: 10g
     deploy:
       resources:
         reservations:
@@ -15,6 +19,33 @@ services:
       - ./data_volume:/app/data
       - ./hf_cache:/root/.cache/huggingface
     environment:
-      - WHISPER_MODEL=medium
-      - NVIDIA_ visible_devices=all
+      - WHISPER_MODEL=large-v3
+      - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      - HF_TOKEN=${HF_TOKEN}
+
+  # One-shot CLI: transcribe a single file with transcribir.py
+  # Usage:
+  #   docker compose run --rm transcribir -i /data/input/video.mp4 -o /data/output/result.txt
+  #   docker compose run --rm transcribir -i /data/input/video.mp4 -o /data/output/result.txt -n 2 -m large-v3
+  transcribir:
+    build: .
+    container_name: transcribir-cli
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ./data_volume:/data
+      - ./hf_cache:/root/.cache/huggingface
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      - HF_TOKEN=${HF_TOKEN}
+    entrypoint: ["python", "/app/transcribir.py"]
+    profiles:
+      - cli

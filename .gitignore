@@ -1,0 +1,36 @@
+# Data volumes — audio/video files and transcription outputs
+data_volume/
+
+# HuggingFace model cache (large binary files)
+hf_cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# Secrets — never commit
+.env
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
