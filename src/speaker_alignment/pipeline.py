@@ -9,6 +9,7 @@ from .contracts import SegmentAssembler, SpeakerAssigner, WordPostProcessor
 from .relabeler import SpeakerRelabeler
 from .segment_builder import SegmentBuilder
 from .smoother import ShortTurnSmoother
+from .splitter import MaxDurationSplitter, NoSplit
 
 
 @dataclass(frozen=True)
@@ -19,11 +20,14 @@ class AlignmentConfig:
       **or** shorter than this is absorbed by its neighbours (0 and 0 disable it).
     * ``main_speaker_label`` – optional label for whoever speaks most (e.g. PROFESOR).
     * ``pause_split_sec`` – silence that starts a new line for the same speaker.
+    * ``max_segment_sec`` – paragraphs longer than this are split at the next
+      sentence end (0 disables it).
     """
     min_turn_words: int = 3
     min_turn_sec: float = 1.5
     main_speaker_label: Optional[str] = None
     pause_split_sec: float = 2.0
+    max_segment_sec: float = 30.0
 
 
 class SpeakerAlignmentPipeline:
@@ -46,6 +50,12 @@ class SpeakerAlignmentPipeline:
         return self._segment_builder.build(labelled)
 
 
+def _splitter_for(max_segment_sec: float):
+    if max_segment_sec < 0:
+        raise ValueError(f"max_segment_sec must be >= 0 (got {max_segment_sec})")
+    return MaxDurationSplitter(max_segment_sec) if max_segment_sec > 0 else NoSplit()
+
+
 def build_alignment_pipeline(config: AlignmentConfig) -> SpeakerAlignmentPipeline:
     """Default wiring used by both the daemon and the CLI."""
     return SpeakerAlignmentPipeline(
@@ -55,5 +65,6 @@ def build_alignment_pipeline(config: AlignmentConfig) -> SpeakerAlignmentPipelin
                               config.pause_split_sec),
             SpeakerRelabeler(config.main_speaker_label),
         ],
-        segment_builder=SegmentBuilder(config.pause_split_sec),
+        segment_builder=SegmentBuilder(config.pause_split_sec,
+                                       _splitter_for(config.max_segment_sec)),
     )

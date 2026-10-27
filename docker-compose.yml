@@ -36,6 +36,9 @@ services:
       - MAIN_SPEAKER_LABEL=${MAIN_SPEAKER_LABEL:-}
       # Silence (seconds) that starts a new line for the same speaker.
       - PAUSE_SPLIT_SEC=${PAUSE_SPLIT_SEC:-2.0}
+      # Lines longer than this (seconds) are split at the next sentence end
+      # (then comma at 2x, forced at 3x). 0 = keep whole paragraphs.
+      - MAX_SEGMENT_SEC=${MAX_SEGMENT_SEC:-30}
 
   # One-shot CLI: transcribe a single file with transcribir.py
   # Usage:

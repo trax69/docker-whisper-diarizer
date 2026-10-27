@@ -48,7 +48,8 @@ class ComposeTest(unittest.TestCase):
     def test_daemon_exposes_the_new_tuning_variables(self):
         compose = _read("docker-compose.yml")
         for var in ("NUM_SPEAKERS", "MIN_SPEAKERS", "MAX_SPEAKERS", "MIN_TURN_WORDS",
-                    "MIN_TURN_SEC", "MAIN_SPEAKER_LABEL", "PAUSE_SPLIT_SEC"):
+                    "MIN_TURN_SEC", "MAIN_SPEAKER_LABEL", "PAUSE_SPLIT_SEC",
+                    "MAX_SEGMENT_SEC"):
             with self.subTest(var=var):
                 self.assertTrue(f"{var}=${{{var}" in compose, f"{var} missing in compose")
 

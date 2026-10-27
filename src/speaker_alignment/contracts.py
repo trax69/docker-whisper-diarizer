@@ -21,6 +21,13 @@ class WordPostProcessor(Protocol):
         ...
 
 
+class SegmentSplitter(Protocol):
+    """Decides whether to close the current segment right after ``last_word``."""
+
+    def should_split(self, segment: Segment, last_word: WordToken) -> bool:
+        ...
+
+
 class SegmentAssembler(Protocol):
     """Groups labelled words into transcript segments."""
 

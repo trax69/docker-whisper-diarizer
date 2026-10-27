@@ -42,11 +42,13 @@ def speaker_count_hint_from_env(env: Mapping[str, str]) -> SpeakerCountHint:
 
 
 def alignment_config_from_env(env: Mapping[str, str]) -> AlignmentConfig:
-    """MIN_TURN_WORDS, MIN_TURN_SEC, MAIN_SPEAKER_LABEL, PAUSE_SPLIT_SEC → AlignmentConfig."""
+    """MIN_TURN_WORDS, MIN_TURN_SEC, MAIN_SPEAKER_LABEL, PAUSE_SPLIT_SEC,
+    MAX_SEGMENT_SEC → AlignmentConfig."""
     defaults = AlignmentConfig()
     return AlignmentConfig(
         min_turn_words=_parse(env, "MIN_TURN_WORDS", int, defaults.min_turn_words),
         min_turn_sec=_parse(env, "MIN_TURN_SEC", _to_float, defaults.min_turn_sec),
         main_speaker_label=_raw(env, "MAIN_SPEAKER_LABEL"),
         pause_split_sec=_parse(env, "PAUSE_SPLIT_SEC", _to_float, defaults.pause_split_sec),
+        max_segment_sec=_parse(env, "MAX_SEGMENT_SEC", _to_float, defaults.max_segment_sec),
     )

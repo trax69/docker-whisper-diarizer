@@ -38,12 +38,22 @@ class AlignmentConfigFromEnvTest(unittest.TestCase):
 
     def test_reads_all_variables(self):
         env = {"MIN_TURN_WORDS": "5", "MIN_TURN_SEC": "2.5",
-               "MAIN_SPEAKER_LABEL": "PROFESOR", "PAUSE_SPLIT_SEC": "3"}
+               "MAIN_SPEAKER_LABEL": "PROFESOR", "PAUSE_SPLIT_SEC": "3",
+               "MAX_SEGMENT_SEC": "45"}
         self.assertEqual(
             alignment_config_from_env(env),
             AlignmentConfig(min_turn_words=5, min_turn_sec=2.5,
-                            main_speaker_label="PROFESOR", pause_split_sec=3.0),
+                            main_speaker_label="PROFESOR", pause_split_sec=3.0,
+                            max_segment_sec=45.0),
         )
+
+    def test_max_segment_accepts_decimal_comma_and_zero(self):
+        self.assertEqual(alignment_config_from_env({"MAX_SEGMENT_SEC": "30,5"}).max_segment_sec, 30.5)
+        self.assertEqual(alignment_config_from_env({"MAX_SEGMENT_SEC": "0"}).max_segment_sec, 0.0)
+
+    def test_invalid_max_segment_names_the_variable(self):
+        with self.assertRaisesRegex(ValueError, "MAX_SEGMENT_SEC"):
+            alignment_config_from_env({"MAX_SEGMENT_SEC": "medio minuto"})
 
     def test_decimal_comma_is_accepted(self):
         self.assertEqual(alignment_config_from_env({"MIN_TURN_SEC": "1,5"}).min_turn_sec, 1.5)

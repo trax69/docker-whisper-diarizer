@@ -230,6 +230,9 @@ def _build_parser() -> argparse.ArgumentParser:
     smoothing.add_argument("--pause-split-sec", type=float, default=defaults.pause_split_sec,
                            help="Silence (seconds) that starts a new line "
                                 f"(default: {defaults.pause_split_sec})")
+    smoothing.add_argument("--max-segment-sec", type=float, default=defaults.max_segment_sec,
+                           help="Lines longer than this (seconds) are split at the next "
+                                f"sentence end (default: {defaults.max_segment_sec}; 0 disables)")
     return parser
 
 
@@ -247,6 +250,7 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> AppConfig:
             min_turn_sec=args.min_turn_sec,
             main_speaker_label=(args.main_speaker_label or "").strip() or None,
             pause_split_sec=args.pause_split_sec,
+            max_segment_sec=args.max_segment_sec,
         )
         build_alignment_pipeline(alignment)  # validate thresholds before loading models
     except ValueError as e:

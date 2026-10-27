@@ -93,6 +93,26 @@ class BuildAlignmentPipelineTest(unittest.TestCase):
         self.assertEqual(config.min_turn_sec, 1.5)
         self.assertIsNone(config.main_speaker_label)
         self.assertEqual(config.pause_split_sec, 2.0)
+        self.assertEqual(config.max_segment_sec, 30.0)
+
+    def test_long_paragraph_is_split_by_default(self):
+        texts = [f"p{i}." if i % 10 == 9 else f"p{i}" for i in range(480)]  # 6 min monologue
+        words = [word(i * 0.75, (i + 1) * 0.75, t) for i, t in enumerate(texts)]
+
+        segments = build_alignment_pipeline(AlignmentConfig()).run(words, [])
+
+        self.assertGreater(len(segments), 1)
+        self.assertTrue(all(s.end - s.start <= 90 for s in segments))
+        self.assertEqual(" ".join(s.text for s in segments), " ".join(texts))
+
+    def test_max_segment_zero_disables_splitting(self):
+        words = [word(i * 0.75, (i + 1) * 0.75, "fin.") for i in range(480)]
+        segments = build_alignment_pipeline(AlignmentConfig(max_segment_sec=0)).run(words, [])
+        self.assertEqual(len(segments), 1)
+
+    def test_negative_max_segment_fails_fast(self):
+        with self.assertRaises(ValueError):
+            build_alignment_pipeline(AlignmentConfig(max_segment_sec=-5))
 
 
 if __name__ == "__main__":

@@ -41,6 +41,16 @@ class CliArgumentsTest(unittest.TestCase):
         self.assertEqual(config.alignment, self.cli.AlignmentConfig(
             min_turn_words=4, min_turn_sec=2.0, main_speaker_label="PROFESOR"))
 
+    def test_max_segment_flag(self):
+        config = self.cli.parse_arguments(["-i", "a", "-o", "b", "--max-segment-sec", "45"])
+        self.assertEqual(config.alignment.max_segment_sec, 45.0)
+        config = self.cli.parse_arguments(["-i", "a", "-o", "b", "--max-segment-sec", "0"])
+        self.assertEqual(config.alignment.max_segment_sec, 0.0)
+
+    def test_negative_max_segment_is_rejected(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.cli.parse_arguments(["-i", "a", "-o", "b", "--max-segment-sec", "-1"])
+
     def test_exact_speakers_flag_is_kept(self):
         config = self.cli.parse_arguments(["-i", "a", "-o", "b", "-n", "2"])
         self.assertEqual(config.speaker_hint, self.cli.SpeakerCountHint(num_speakers=2))

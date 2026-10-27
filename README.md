@@ -31,6 +31,7 @@ The pipeline follows these steps:
     1. **Assignment:** each word goes to the speaker that overlaps it the most in time; words in a gap go to the *nearest* turn.
     2. **Smoothing:** speaker turns with fewer than `MIN_TURN_WORDS` words or shorter than `MIN_TURN_SEC` seconds are absorbed by their neighbours. This removes the one-word false speakers ("pues", "vale"…) that pyannote produces on breaths or noise, while real interventions survive.
     3. **Relabelling:** speakers are renamed by speaking time, so `SPEAKER_00` is always whoever talks the most (optionally renamed with `MAIN_SPEAKER_LABEL`, e.g. `PROFESOR`).
+    4. **Paragraph splitting:** lines longer than `MAX_SEGMENT_SEC` (default 30 s) are split at the next sentence end (`.` `?` `!` `…`), at a comma after twice that time, and forcibly after three times. Timecodes stay exact, so each line can be located in the video.
 5. **Output:** A formatted text file with timecodes, speaker labels, and text.
 
 **Output format:**
@@ -102,6 +103,7 @@ environment:
 | `MIN_TURN_SEC` | `1.5` | A speaker turn shorter than this (seconds) is absorbed by its neighbours. `MIN_TURN_WORDS=0` + `MIN_TURN_SEC=0` disables smoothing. |
 | `MAIN_SPEAKER_LABEL` | *(empty)* | Label for whoever speaks most, e.g. `PROFESOR`. Others stay `SPEAKER_01`, `SPEAKER_02`… |
 | `PAUSE_SPLIT_SEC` | `2.0` | Silence (seconds) that starts a new line for the same speaker. |
+| `MAX_SEGMENT_SEC` | `30` | Lines longer than this are split at the next sentence end (comma at 2×, forced at 3×). `0` keeps whole paragraphs. |
 
 Example `.env` for recorded lectures:
 ```bash
@@ -166,6 +168,7 @@ python transcribir.py -i "path/to/audio.mp3" -o "path/to/output.txt" -m large-v3
 | `--min-turn-sec` | Turns shorter than this are absorbed by their neighbours (default: `1.5`, `0` disables) |
 | `--main-speaker-label` | Label for whoever speaks most, e.g. `PROFESOR` |
 | `--pause-split-sec` | Silence that starts a new line (default: `2.0`) |
+| `--max-segment-sec` | Lines longer than this are split at the next sentence end (default: `30`, `0` disables) |
 
 ---
 
@@ -183,7 +186,7 @@ python transcribir.py -i "path/to/audio.mp3" -o "path/to/output.txt" -m large-v3
 └── src/
     ├── main.py             # Watchdog service & queue manager (Docker entrypoint)
     ├── engine.py           # Faster-Whisper + pyannote in isolated subprocesses (Spanish)
-    ├── speaker_alignment/  # Word → speaker assignment, smoothing, relabelling, segments
+    ├── speaker_alignment/  # Word → speaker assignment, smoothing, relabelling, segments, splitting
     ├── speaker_count.py    # NUM/MIN/MAX speaker hints forwarded to pyannote
     ├── settings.py         # Daemon configuration from environment variables
     ├── media_filter.py     # Which files in input/ are audio/video
