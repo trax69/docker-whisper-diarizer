@@ -26,8 +26,11 @@ The pipeline follows these steps:
 
 1. **Input:** Audio/Video file (mp3, wav, mp4, mkv, etc.).
 2. **Transcription (subprocess):** Faster-Whisper generates word-level tokens with precise timestamps.
-3. **Diarization (subprocess):** pyannote/speaker-diarization-3.1 segments the audio by speaker identity.
-4. **Alignment:** Each word token is assigned to the speaker active at its midpoint.
+3. **Diarization (subprocess):** pyannote/speaker-diarization-3.1 segments the audio by speaker identity (optionally constrained by `NUM_SPEAKERS` / `MIN_SPEAKERS` / `MAX_SPEAKERS`).
+4. **Alignment** (`src/speaker_alignment/`, shared by the daemon and the CLI):
+    1. **Assignment:** each word goes to the speaker that overlaps it the most in time; words in a gap go to the *nearest* turn.
+    2. **Smoothing:** speaker turns with fewer than `MIN_TURN_WORDS` words or shorter than `MIN_TURN_SEC` seconds are absorbed by their neighbours. This removes the one-word false speakers ("pues", "vale"…) that pyannote produces on breaths or noise, while real interventions survive.
+    3. **Relabelling:** speakers are renamed by speaking time, so `SPEAKER_00` is always whoever talks the most (optionally renamed with `MAIN_SPEAKER_LABEL`, e.g. `PROFESOR`).
 5. **Output:** A formatted text file with timecodes, speaker labels, and text.
 
 **Output format:**
@@ -79,6 +82,8 @@ docker compose up -d --build
 4. If processing fails, the file is renamed to `ERROR_<filename>` inside `./data_volume/processing`.
 
 > **Note:** Files already present in `input` when the container starts are picked up automatically.
+> Only audio/video extensions are queued (mp4, mkv, mov, webm, mp3, m4a, wav, flac, ogg, opus…);
+> subtitles, transcripts and partial downloads (`.vtt`, `.srt`, `.txt`, `.part`…) are ignored.
 
 **Configure the model:**
 ```yaml
@@ -86,6 +91,28 @@ docker compose up -d --build
 environment:
   - WHISPER_MODEL=large-v3  # Options: tiny, base, small, medium, large-v3
 ```
+
+**Tune speaker detection** — add any of these to `.env` (blank = default) and run `docker compose up -d`:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `NUM_SPEAKERS` | *(auto)* | Exact number of speakers. Wins over MIN/MAX. |
+| `MIN_SPEAKERS` / `MAX_SPEAKERS` | *(auto)* | Range of speakers pyannote may find. E.g. `MAX_SPEAKERS=3` for a class with few spoken questions. |
+| `MIN_TURN_WORDS` | `3` | A speaker turn with fewer words is absorbed by its neighbours. |
+| `MIN_TURN_SEC` | `1.5` | A speaker turn shorter than this (seconds) is absorbed by its neighbours. `MIN_TURN_WORDS=0` + `MIN_TURN_SEC=0` disables smoothing. |
+| `MAIN_SPEAKER_LABEL` | *(empty)* | Label for whoever speaks most, e.g. `PROFESOR`. Others stay `SPEAKER_01`, `SPEAKER_02`… |
+| `PAUSE_SPLIT_SEC` | `2.0` | Silence (seconds) that starts a new line for the same speaker. |
+
+Example `.env` for recorded lectures:
+```bash
+HF_TOKEN=hf_your_token_here
+MAX_SPEAKERS=4
+MAIN_SPEAKER_LABEL=PROFESOR
+```
+
+> Trade-off: a very short real reply ("Sí", "Gracias") is merged into the surrounding speaker.
+> Questions of a few words and a couple of seconds are preserved. Lower the thresholds if you need them.
+> Invalid values (e.g. `MIN_SPEAKERS=3` with `MAX_SPEAKERS=2`) stop the daemon at start-up with a clear error.
 
 > The watchdog transcribes in **Spanish** (`language=es`). To change the language, edit `src/engine.py` → `_whisper_worker()`.
 
@@ -101,6 +128,10 @@ docker compose run --rm transcribir -i /data/input/audio.mp3 -o /data/output/res
 
 # With known number of speakers and a specific model
 docker compose run --rm transcribir -i /data/input/video.mp4 -o /data/output/result.txt -n 2 -m large-v3
+
+# Lecture: at most 3 speakers, teacher labelled as PROFESOR
+docker compose run --rm transcribir -i /data/input/video.mp4 -o /data/output/result.txt \
+    --max-speakers 3 --main-speaker-label PROFESOR
 ```
 
 Files in `./data_volume/` are accessible inside the container under `/data/`.
@@ -129,7 +160,12 @@ python transcribir.py -i "path/to/audio.mp3" -o "path/to/output.txt" -m large-v3
 | `-i` | Path to input audio/video file (required) |
 | `-o` | Path to save the output `.txt` file (required) |
 | `-m` | Whisper model size (default: `medium`) |
-| `-n` | Number of speakers — if known, improves diarization accuracy |
+| `-n`, `--speakers` | Exact number of speakers — if known, improves diarization accuracy |
+| `--min-speakers` / `--max-speakers` | Range of speakers when the exact number is unknown |
+| `--min-turn-words` | Turns with fewer words are absorbed by their neighbours (default: `3`, `0` disables) |
+| `--min-turn-sec` | Turns shorter than this are absorbed by their neighbours (default: `1.5`, `0` disables) |
+| `--main-speaker-label` | Label for whoever speaks most, e.g. `PROFESOR` |
+| `--pause-split-sec` | Silence that starts a new line (default: `2.0`) |
 
 ---
 
@@ -140,19 +176,41 @@ python transcribir.py -i "path/to/audio.mp3" -o "path/to/output.txt" -m large-v3
 ├── Dockerfile              # CUDA 12.4.1 based image definition
 ├── docker-compose.yml      # GPU reservation, volume mapping, and service definitions
 ├── requirements.txt        # Python dependencies (PyTorch 2.5.1 + CUDA 12.4)
-├── transcribir.py          # Self-contained CLI (auto language detection)
+├── transcribir.py          # One-shot CLI (auto language detection)
 ├── data_volume/            # Created at runtime — input/output/processing/completed
-├── hf_cache/               # Created at runtime — persists HuggingFace model downloads
+├── hf_cache/               # Created at runtime — persists HuggingFace + pyannote model downloads
+├── tests/                  # unittest suite (no GPU needed for the core logic)
 └── src/
     ├── main.py             # Watchdog service & queue manager (Docker entrypoint)
-    └── engine.py           # Core pipeline: Faster-Whisper + pyannote (Spanish, subprocess isolation)
+    ├── engine.py           # Faster-Whisper + pyannote in isolated subprocesses (Spanish)
+    ├── speaker_alignment/  # Word → speaker assignment, smoothing, relabelling, segments
+    ├── speaker_count.py    # NUM/MIN/MAX speaker hints forwarded to pyannote
+    ├── settings.py         # Daemon configuration from environment variables
+    ├── media_filter.py     # Which files in input/ are audio/video
+    ├── transcript_models.py# WordToken, SpeakerTurn, Segment
+    └── transcript_writer.py# Output line format
+```
+
+---
+
+## Tests
+
+The alignment logic is pure Python, so the suite runs without a GPU:
+
+```bash
+# Locally (Python 3.10+; CLI tests are skipped if torch/faster-whisper are missing)
+python -m unittest discover -s tests -t . -v
+
+# Inside the image (runs everything, including the CLI tests)
+docker compose run --rm --entrypoint python transcribir -m unittest discover -s /app/tests -t /app -v
 ```
 
 ---
 
 ## Notes on Performance
 
-* **First Run:** The Whisper model and pyannote models are downloaded automatically from HuggingFace into `./hf_cache/`. Subsequent runs use the local cache.
+* **First Run:** The Whisper model and pyannote models are downloaded automatically into `./hf_cache/` (pyannote's own cache lives in `./hf_cache/pyannote` via `PYANNOTE_CACHE`). Subsequent runs, even after re-creating the container, use the local cache.
+* **pyannote version:** pinned to `>=3.1,<4.0`; the 4.x series changed the pipeline API.
 * **VRAM Requirements:**
     * `medium`: ~3 GB VRAM
     * `large-v3`: ~6 GB VRAM (float16) — recommended for best accuracy

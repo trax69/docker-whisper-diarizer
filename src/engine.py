@@ -6,8 +6,11 @@ import multiprocessing as mp
 import os
 import subprocess
 import tempfile
-from typing import List, Optional
-from dataclasses import dataclass
+from typing import Dict, List, Optional
+
+from speaker_alignment import AlignmentConfig, TranscriptAligner, build_alignment_pipeline
+from speaker_count import SpeakerCountHint
+from transcript_models import Segment, SpeakerTurn, WordToken
 
 logger = logging.getLogger("TranscriberEngine")
 
@@ -124,7 +127,7 @@ def _whisper_worker(
 # ---------------------------------------------------------------------------
 
 def _diarize_worker(
-    wav_path: str, num_speakers_str: str, output_path: str
+    wav_path: str, pipeline_kwargs: Dict[str, int], output_path: str
 ) -> None:
     import json as _json
     import logging as _log
@@ -170,11 +173,8 @@ def _diarize_worker(
     else:
         _logger.info("Diarization running on CPU (may be slow for long files).")
 
-    num_speakers = None if num_speakers_str == "None" else int(num_speakers_str)
-    kwargs = {} if num_speakers is None else {"num_speakers": num_speakers}
-
-    _logger.info("Running speaker diarization...")
-    diarization = pipeline(wav_path, **kwargs)
+    _logger.info(f"Running speaker diarization (hints: {pipeline_kwargs or 'auto'})...")
+    diarization = pipeline(wav_path, **pipeline_kwargs)
 
     segments = [
         {"start": round(turn.start, 3), "end": round(turn.end, 3), "speaker": speaker}
@@ -189,41 +189,32 @@ def _diarize_worker(
 
 
 # ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
-
-@dataclass
-class WordToken:
-    start: float
-    end: float
-    word: str
-    speaker: str = "UNKNOWN"
-
-
-@dataclass
-class Segment:
-    start: float
-    end: float
-    text: str
-    speaker: str = "UNKNOWN"
-
-
-# ---------------------------------------------------------------------------
 # Engine
+# Orchestrates the heavy steps (Whisper, pyannote) in isolated subprocesses and
+# delegates word → speaker alignment to an injected TranscriptAligner.
 # ---------------------------------------------------------------------------
 
 class DiarizationEngine:
-    PAUSE_SPLIT_SEC = 2.0
-
-    def __init__(self, model_size: str = "medium", device: str = None):
+    def __init__(
+        self,
+        model_size: str = "medium",
+        device: Optional[str] = None,
+        speaker_hint: Optional[SpeakerCountHint] = None,
+        alignment: Optional[TranscriptAligner] = None,
+    ):
         self._model_size = model_size
         self._device = device or os.getenv("WHISPER_DEVICE", "cuda")
+        self._speaker_hint = speaker_hint or SpeakerCountHint()
+        self._alignment = alignment or build_alignment_pipeline(AlignmentConfig())
         logger.info(
-            f"Initializing engine. whisper_device={self._device}. "
+            f"Initializing engine. whisper_device={self._device}, "
+            f"speakers={self._speaker_hint.describe()}. "
             "Pyannote diarization runs per-file in subprocess."
         )
 
-    def process_file(self, input_path: str, num_speakers: Optional[int] = None) -> List[Segment]:
+    def process_file(
+        self, input_path: str, speaker_hint: Optional[SpeakerCountHint] = None
+    ) -> List[Segment]:
         logger.info(f"Processing: {input_path} | RSS: {_rss_mb()} MB | cgroup: {_cgroup_mb()} MB")
 
         words = self._transcribe_with_cache(input_path)
@@ -235,9 +226,13 @@ class DiarizationEngine:
         _malloc_trim()
         logger.info(f"Post-transcription: RSS: {_rss_mb()} MB | cgroup: {_cgroup_mb()} MB")
 
-        speaker_segments = self._diarize(input_path, num_speakers)
-        self._assign_speakers_to_words(words, speaker_segments)
-        return self._merge_words_into_segments(words)
+        turns = self._diarize(input_path, speaker_hint or self._speaker_hint)
+        if not turns:
+            logger.warning("No diarization output — using a single speaker.")
+        segments = self._alignment.run(words, turns)
+        n_speakers = len({s.speaker for s in segments})
+        logger.info(f"Alignment done: {len(segments)} segments, {n_speakers} speaker(s).")
+        return segments
 
     # ------------------------------------------------------------------
     # Phase 1 – transcription (with disk cache to survive restarts)
@@ -322,8 +317,8 @@ class DiarizationEngine:
             raise RuntimeError(f"ffmpeg failed: {result.stderr.decode()}")
 
     def _diarize(
-        self, input_path: str, num_speakers: Optional[int]
-    ) -> List[Segment]:
+        self, input_path: str, speaker_hint: SpeakerCountHint
+    ) -> List[SpeakerTurn]:
         tmp_wav = input_path + ".diarize.wav"
         tmp_segs = input_path + ".diarize.json"
 
@@ -337,7 +332,7 @@ class DiarizationEngine:
             ctx = mp.get_context("spawn")
             proc = ctx.Process(
                 target=_diarize_worker,
-                args=(tmp_wav, str(num_speakers), tmp_segs),
+                args=(tmp_wav, speaker_hint.to_pipeline_kwargs(), tmp_segs),
             )
             proc.start()
             proc.join(timeout=7200)
@@ -362,7 +357,7 @@ class DiarizationEngine:
             with open(tmp_segs, encoding="utf-8") as fh:
                 data = json.load(fh)
 
-            return [Segment(s["start"], s["end"], "", s["speaker"]) for s in data]
+            return [SpeakerTurn(s["start"], s["end"], s["speaker"]) for s in data]
 
         except RuntimeError as e:
             logger.exception(f"Diarization audio extraction failed: {e}")
@@ -374,59 +369,5 @@ class DiarizationEngine:
                 except OSError:
                     pass
 
-    # ------------------------------------------------------------------
-    # Phase 3 – assign speakers to words
-    # ------------------------------------------------------------------
-
-    def _assign_speakers_to_words(
-        self, words: List[WordToken], speaker_segments: List[Segment]
-    ) -> None:
-        if not speaker_segments:
-            for word in words:
-                word.speaker = "SPEAKER_00"
-            return
-        for word in words:
-            midpoint = (word.start + word.end) / 2.0
-            word.speaker = self._speaker_at(midpoint, speaker_segments)
-
-    @staticmethod
-    def _speaker_at(t: float, segments: List[Segment]) -> str:
-        fallback = "SPEAKER_00"
-        for seg in segments:
-            if seg.start <= t <= seg.end:
-                return seg.speaker
-            if seg.end < t:
-                fallback = seg.speaker
-        return fallback
-
-    # ------------------------------------------------------------------
-    # Phase 4 – merge words → output segments
-    # ------------------------------------------------------------------
-
-    def _merge_words_into_segments(self, words: List[WordToken]) -> List[Segment]:
-        if not words:
-            return []
-
-        result: List[Segment] = []
-        seg_start = words[0].start
-        seg_end = words[0].end
-        seg_speaker = words[0].speaker
-        seg_text = words[0].word
-
-        for w in words[1:]:
-            pause = w.start - seg_end
-            if w.speaker == seg_speaker and pause <= self.PAUSE_SPLIT_SEC:
-                seg_text += w.word
-                seg_end = w.end
-            else:
-                if seg_text.strip():
-                    result.append(Segment(seg_start, seg_end, seg_text.strip(), seg_speaker))
-                seg_start = w.start
-                seg_end = w.end
-                seg_speaker = w.speaker
-                seg_text = w.word
-
-        if seg_text.strip():
-            result.append(Segment(seg_start, seg_end, seg_text.strip(), seg_speaker))
-
-        return result
+    # Phase 3 (word → speaker, smoothing, relabelling) and phase 4 (segments)
+    # live in the `speaker_alignment` package, injected as `self._alignment`.

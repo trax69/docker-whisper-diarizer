@@ -5,12 +5,23 @@ import os
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
-from typing import Optional, List
+from dataclasses import dataclass, field
+from typing import List, Optional, Sequence
+
+# Shared pure-Python modules live in ./src (PYTHONPATH=/app/src in the image;
+# added here too so the script also works when run from a checkout).
+_SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
 
 import torch
 from faster_whisper import WhisperModel
 from tqdm import tqdm
+
+from speaker_alignment import AlignmentConfig, TranscriptAligner, build_alignment_pipeline
+from speaker_count import SpeakerCountHint
+from transcript_models import Segment, SpeakerTurn, WordToken
+from transcript_writer import write_segments
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,24 +35,9 @@ class AppConfig:
     input_path: str
     output_path: str
     model_size: str
-    num_speakers: Optional[int]
+    speaker_hint: SpeakerCountHint = field(default_factory=SpeakerCountHint)
+    alignment: AlignmentConfig = field(default_factory=AlignmentConfig)
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
-
-
-@dataclass
-class WordToken:
-    start: float
-    end: float
-    word: str
-    speaker: str = "UNKNOWN"
-
-
-@dataclass
-class Segment:
-    start: float
-    end: float
-    text: str
-    speaker: str = "UNKNOWN"
 
 
 class IOManager:
@@ -56,9 +52,7 @@ class IOManager:
     def write_output(path: str, segments: List[Segment]) -> None:
         try:
             with open(path, 'w', encoding='utf-8') as f:
-                for seg in segments:
-                    line = f"[{seg.start:.2f}s - {seg.end:.2f}s] {seg.speaker}: {seg.text.strip()}\n"
-                    f.write(line)
+                write_segments(f, segments)
             logger.info(f"Transcription saved to: {path}")
         except IOError as e:
             logger.exception(f"Failed to write output file: {e}")
@@ -76,10 +70,9 @@ def _extract_to_wav(input_path: str, wav_path: str) -> None:
 
 
 class DiarizationEngine:
-    PAUSE_SPLIT_SEC = 2.0
-
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, alignment: Optional[TranscriptAligner] = None):
         self.config = config
+        self._alignment = alignment or build_alignment_pipeline(config.alignment)
         logger.info(f"Loading Whisper model '{config.model_size}' on {config.device}...")
         self.whisper = WhisperModel(
             config.model_size,
@@ -103,18 +96,12 @@ class DiarizationEngine:
         logger.info("Whisper freed. Starting diarization.")
 
         # Phase 2: Diarize with pyannote
-        speaker_segments = self._diarize()
-
-        # Phase 3: Assign speakers to words
-        if not speaker_segments:
+        turns = self._diarize()
+        if not turns:
             logger.warning("No diarization output — using single speaker.")
-            for w in words:
-                w.speaker = "SPEAKER_00"
-        else:
-            self._assign_speakers_to_words(words, speaker_segments)
 
-        # Phase 4: Merge into output segments
-        return self._merge_words_into_segments(words)
+        # Phases 3-4: assign speakers, smooth short turns, relabel, build segments
+        return self._alignment.run(words, turns)
 
     # ------------------------------------------------------------------
     # Phase 1 – transcription
@@ -155,7 +142,7 @@ class DiarizationEngine:
     # Phase 2 – diarization via pyannote/speaker-diarization-3.1
     # ------------------------------------------------------------------
 
-    def _diarize(self) -> List[Segment]:
+    def _diarize(self) -> List[SpeakerTurn]:
         from pyannote.audio import Pipeline
 
         # HF_TOKEN env var is picked up automatically by huggingface_hub>=0.19.
@@ -183,27 +170,20 @@ class DiarizationEngine:
         try:
             _extract_to_wav(self.config.input_path, tmp_wav)
 
-            kwargs = {} if self.config.num_speakers is None else {
-                "num_speakers": self.config.num_speakers
-            }
-            logger.info("Running speaker diarization...")
-            diarization = pipeline(tmp_wav, **kwargs)
+            hint = self.config.speaker_hint
+            logger.info(f"Running speaker diarization (speakers: {hint.describe()})...")
+            diarization = pipeline(tmp_wav, **hint.to_pipeline_kwargs())
 
-            segments = [
-                Segment(
-                    start=round(turn.start, 3),
-                    end=round(turn.end, 3),
-                    text="",
-                    speaker=speaker,
-                )
+            turns = [
+                SpeakerTurn(round(turn.start, 3), round(turn.end, 3), speaker)
                 for turn, _, speaker in diarization.itertracks(yield_label=True)
             ]
 
-            n_speakers = len({s.speaker for s in segments})
+            n_speakers = len({t.speaker for t in turns})
             logger.info(
-                f"Diarization done: {len(segments)} segments, {n_speakers} speaker(s)."
+                f"Diarization done: {len(turns)} turns, {n_speakers} speaker(s)."
             )
-            return segments
+            return turns
 
         finally:
             try:
@@ -215,78 +195,69 @@ class DiarizationEngine:
             if self.config.device == "cuda":
                 torch.cuda.empty_cache()
 
-    # ------------------------------------------------------------------
-    # Phase 3 – assign speakers to words
-    # ------------------------------------------------------------------
-
-    def _assign_speakers_to_words(
-        self, words: List[WordToken], speaker_segments: List[Segment]
-    ) -> None:
-        for word in words:
-            midpoint = (word.start + word.end) / 2.0
-            word.speaker = self._speaker_at(midpoint, speaker_segments)
-
-    @staticmethod
-    def _speaker_at(t: float, segments: List[Segment]) -> str:
-        fallback = "SPEAKER_00"
-        for seg in segments:
-            if seg.start <= t <= seg.end:
-                return seg.speaker
-            if seg.end < t:
-                fallback = seg.speaker
-        return fallback
-
-    # ------------------------------------------------------------------
-    # Phase 4 – merge words → output segments
-    # ------------------------------------------------------------------
-
-    def _merge_words_into_segments(self, words: List[WordToken]) -> List[Segment]:
-        if not words:
-            return []
-
-        result: List[Segment] = []
-        seg_start = words[0].start
-        seg_end = words[0].end
-        seg_speaker = words[0].speaker
-        seg_text = words[0].word
-
-        for w in words[1:]:
-            pause = w.start - seg_end
-            if w.speaker == seg_speaker and pause <= self.PAUSE_SPLIT_SEC:
-                seg_text += w.word
-                seg_end = w.end
-            else:
-                if seg_text.strip():
-                    result.append(
-                        Segment(seg_start, seg_end, seg_text.strip(), seg_speaker)
-                    )
-                seg_start = w.start
-                seg_end = w.end
-                seg_speaker = w.speaker
-                seg_text = w.word
-
-        if seg_text.strip():
-            result.append(Segment(seg_start, seg_end, seg_text.strip(), seg_speaker))
-
-        return result
+    # Phases 3-4 (word → speaker, smoothing, relabelling, segments) live in the
+    # shared `speaker_alignment` package (src/), injected as `self._alignment`.
 
 
-def parse_arguments() -> AppConfig:
-    parser = argparse.ArgumentParser(description="Local Neural Diarization Tool")
+def _build_parser() -> argparse.ArgumentParser:
+    defaults = AlignmentConfig()
+    parser = argparse.ArgumentParser(prog="transcribir.py",
+                                     description="Local Neural Diarization Tool")
     parser.add_argument("-i", "--input", required=True, help="Path to input audio/video file")
     parser.add_argument("-o", "--output", required=True, help="Path to save the output text file")
-    parser.add_argument("-n", "--speakers", type=int, default=None,
-                        help="Number of speakers (auto-detect if omitted)")
     parser.add_argument("-m", "--model", default="medium",
                         choices=["tiny", "base", "small", "medium", "large-v3"],
                         help="Whisper model size (default: medium)")
 
-    args = parser.parse_args()
+    speakers = parser.add_argument_group("speaker count (forwarded to pyannote)")
+    speakers.add_argument("-n", "--speakers", type=int, default=None,
+                          help="Exact number of speakers (auto-detect if omitted)")
+    speakers.add_argument("--min-speakers", type=int, default=None,
+                          help="Minimum number of speakers")
+    speakers.add_argument("--max-speakers", type=int, default=None,
+                          help="Maximum number of speakers")
+
+    smoothing = parser.add_argument_group("speaker smoothing")
+    smoothing.add_argument("--min-turn-words", type=int, default=defaults.min_turn_words,
+                           help="Turns with fewer words are merged into their neighbours "
+                                f"(default: {defaults.min_turn_words}; 0 disables)")
+    smoothing.add_argument("--min-turn-sec", type=float, default=defaults.min_turn_sec,
+                           help="Turns shorter than this (seconds) are merged into their "
+                                f"neighbours (default: {defaults.min_turn_sec}; 0 disables)")
+    smoothing.add_argument("--main-speaker-label", default=None,
+                           help="Label for whoever speaks most, e.g. PROFESOR "
+                                "(default: SPEAKER_00)")
+    smoothing.add_argument("--pause-split-sec", type=float, default=defaults.pause_split_sec,
+                           help="Silence (seconds) that starts a new line "
+                                f"(default: {defaults.pause_split_sec})")
+    return parser
+
+
+def parse_arguments(argv: Optional[Sequence[str]] = None) -> AppConfig:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        speaker_hint = SpeakerCountHint(
+            num_speakers=args.speakers,
+            min_speakers=args.min_speakers,
+            max_speakers=args.max_speakers,
+        )
+        alignment = AlignmentConfig(
+            min_turn_words=args.min_turn_words,
+            min_turn_sec=args.min_turn_sec,
+            main_speaker_label=(args.main_speaker_label or "").strip() or None,
+            pause_split_sec=args.pause_split_sec,
+        )
+        build_alignment_pipeline(alignment)  # validate thresholds before loading models
+    except ValueError as e:
+        parser.error(str(e))  # exits with status 2 and a usage message
+
     return AppConfig(
         input_path=args.input,
         output_path=args.output,
         model_size=args.model,
-        num_speakers=args.speakers,
+        speaker_hint=speaker_hint,
+        alignment=alignment,
     )
 
 

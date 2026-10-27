@@ -9,6 +9,10 @@ from threading import Thread
 from watchdog.observers.polling import PollingObserver as Observer
 from watchdog.events import FileSystemEventHandler
 from engine import DiarizationEngine
+from media_filter import AUXILIARY_SUFFIXES, is_media_file
+from settings import alignment_config_from_env, speaker_count_hint_from_env
+from speaker_alignment import build_alignment_pipeline
+from transcript_writer import write_segments
 
 # Configuration
 INPUT_DIR = "/app/data/input"
@@ -22,15 +26,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("Orchestrator")
 
 
-def _is_media_file(filename: str) -> bool:
-    skip = ('.words.json', '.diarize.wav', '.tmp.wav', '.retry')
-    return (
-        not filename.startswith('.')
-        and not filename.startswith('ERROR_')
-        and not any(filename.endswith(s) for s in skip)
-    )
-
-
 class FileHandler(FileSystemEventHandler):
     def __init__(self, queue):
         self.queue = queue
@@ -38,9 +33,11 @@ class FileHandler(FileSystemEventHandler):
     def on_created(self, event):
         if not event.is_directory:
             filename = os.path.basename(event.src_path)
-            if _is_media_file(filename):
+            if is_media_file(filename):
                 logger.info(f"New file detected: {filename}")
                 self.queue.put(event.src_path)
+            else:
+                logger.info(f"Ignoring non-media file: {filename}")
 
 
 def _retry_path(proc_path: str) -> str:
@@ -70,7 +67,7 @@ def _increment_retry(proc_path: str) -> int:
 
 def _cleanup_leftovers(proc_path: str) -> None:
     """Delete auxiliary files associated with proc_path (words cache, WAV, retry counter)."""
-    for suffix in ('.words.json', '.diarize.wav', '.tmp.wav', '.retry'):
+    for suffix in AUXILIARY_SUFFIXES:
         leftover = proc_path + suffix
         try:
             if os.path.exists(leftover):
@@ -127,8 +124,7 @@ def worker(queue: Queue, engine: DiarizationEngine):
             output_path = os.path.join(OUTPUT_DIR, txt_filename)
 
             with open(output_path, 'w', encoding='utf-8') as f:
-                for seg in segments:
-                    f.write(f"[{seg.start:.2f}s - {seg.end:.2f}s] {seg.speaker}: {seg.text.strip()}\n")
+                write_segments(f, segments)
 
             final_path = os.path.join(COMPLETED_DIR, filename)
             _cleanup_leftovers(proc_path)
@@ -151,7 +147,15 @@ def main():
     ensure_dirs()
     _cleanup_orphaned_wavs(PROCESSING_DIR)
 
-    engine = DiarizationEngine(model_size=MODEL_SIZE)
+    # Fail fast on a bad .env value instead of failing on every file.
+    speaker_hint = speaker_count_hint_from_env(os.environ)
+    alignment_config = alignment_config_from_env(os.environ)
+    logger.info(f"Alignment settings: {alignment_config}")
+    engine = DiarizationEngine(
+        model_size=MODEL_SIZE,
+        speaker_hint=speaker_hint,
+        alignment=build_alignment_pipeline(alignment_config),
+    )
 
     file_queue = Queue()
     processor_thread = Thread(target=worker, args=(file_queue, engine), daemon=True)
@@ -166,12 +170,12 @@ def main():
 
     for f in os.listdir(INPUT_DIR):
         full_path = os.path.join(INPUT_DIR, f)
-        if os.path.isfile(full_path) and _is_media_file(f):
+        if os.path.isfile(full_path) and is_media_file(f):
             file_queue.put(full_path)
 
     for f in os.listdir(PROCESSING_DIR):
         full_path = os.path.join(PROCESSING_DIR, f)
-        if os.path.isfile(full_path) and _is_media_file(f):
+        if os.path.isfile(full_path) and is_media_file(f):
             logger.info(f"Found stuck file in processing, queuing for recovery: {f}")
             file_queue.put(full_path)
 

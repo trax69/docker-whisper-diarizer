@@ -23,11 +23,28 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
       - HF_TOKEN=${HF_TOKEN}
+      # Speaker-count hints for pyannote (set them in .env; empty = auto-detect).
+      # NUM_SPEAKERS wins over MIN/MAX when set.
+      - NUM_SPEAKERS=${NUM_SPEAKERS:-}
+      - MIN_SPEAKERS=${MIN_SPEAKERS:-}
+      - MAX_SPEAKERS=${MAX_SPEAKERS:-}
+      # Speaker smoothing: a turn with fewer words OR shorter than this is merged
+      # into its neighbours (removes one-word false speakers). 0 and 0 = off.
+      - MIN_TURN_WORDS=${MIN_TURN_WORDS:-3}
+      - MIN_TURN_SEC=${MIN_TURN_SEC:-1.5}
+      # Optional label for whoever speaks most (e.g. PROFESOR). Empty = SPEAKER_00.
+      - MAIN_SPEAKER_LABEL=${MAIN_SPEAKER_LABEL:-}
+      # Silence (seconds) that starts a new line for the same speaker.
+      - PAUSE_SPLIT_SEC=${PAUSE_SPLIT_SEC:-2.0}
 
   # One-shot CLI: transcribe a single file with transcribir.py
   # Usage:
   #   docker compose run --rm transcribir -i /data/input/video.mp4 -o /data/output/result.txt
   #   docker compose run --rm transcribir -i /data/input/video.mp4 -o /data/output/result.txt -n 2 -m large-v3
+  #   docker compose run --rm transcribir -i /data/input/video.mp4 -o /data/output/result.txt \
+  #       --min-speakers 1 --max-speakers 3 --main-speaker-label PROFESOR
+  # Run the unit tests inside the image:
+  #   docker compose run --rm --entrypoint python transcribir -m unittest discover -s /app/tests -t /app -v
   transcribir:
     build: .
     container_name: transcribir-cli

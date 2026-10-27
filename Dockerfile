@@ -1,4 +1,4 @@
-# USAMOS LA BASE CUDA 11.8 (Compatible con tus logs)
+# CUDA 12.4 + cuDNN runtime (matches torch 2.5.1+cu124 in requirements.txt)
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -25,10 +25,15 @@ ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64:/u
 
 COPY src/ /app/src/
 COPY transcribir.py /app/transcribir.py
+COPY tests/ /app/tests/
 
 RUN mkdir -p /app/data/input /app/data/output /app/data/processing /app/data/completed
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app/src
+# Keep pyannote's model cache inside the mounted ./hf_cache volume so the
+# segmentation/embedding weights survive container re-creation (default is
+# /root/.cache/torch/pyannote, which lives in the container layer).
+ENV PYANNOTE_CACHE=/root/.cache/huggingface/pyannote
 
 CMD ["python", "src/main.py"]
